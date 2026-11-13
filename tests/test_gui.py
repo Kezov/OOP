@@ -91,6 +91,8 @@ def test_settings_are_remembered(app, tmp_path):
 def test_selftest(fake_sd):
     try:
         import sounddevice  # noqa: F401
-    except OSError:
-        pytest.skip("PortAudio not installed")
+    except Exception:
+        # OSError: PortAudio library missing. PortAudioError: the library
+        # loads but can't initialize (e.g. no audio server on a CI runner).
+        pytest.skip("PortAudio not available")
     assert selftest() == 0
