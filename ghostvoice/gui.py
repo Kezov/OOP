@@ -20,6 +20,8 @@ from .presets import DEFAULT_PRESET, LOWPASS_OFF, NOTES, PRESETS, from_controls,
 SAMPLE_RATE = 48000
 BLOCK_SIZE = 256
 TEST_SECONDS = 5
+SILENT_MIC = 1e-4  # input peak below this (-80 dBFS) counts as a muted mic
+SILENT_POLLS = 40  # warn after 2 s of it (the meters poll every 50 ms)
 CUSTOM = "custom"
 REPO_URL = "https://github.com/Kezov/OOP#hooking-it-up-to-discord"
 
@@ -71,6 +73,9 @@ class App:
         self._apply_job = None
         self._loading = False
         self._meter = [0.0, 0.0]
+        self._silent_polls = 0
+        self.default_out_is_cable = False
+        self.listen_device = None
 
         root.title(f"GhostVoice {__version__}")
         root.resizable(True, False)
@@ -168,7 +173,7 @@ class App:
 
     # --------------------------------------------------------------- devices
     def refresh_devices(self, initial: bool = False) -> None:
-        from .realtime import device_choices, is_cable
+        from .realtime import device_choices, is_cable, pick_real
 
         din = dout = -1
         try:
@@ -184,9 +189,13 @@ class App:
 
         want_in = self.in_var.get() or (self.cfg.get("input") if initial else "")
         if want_in not in in_names:
-            default = next((n for i, n in self.inputs if i == din and not is_cable(n)), None)
-            want_in = default or next((n for n in in_names if not is_cable(n)), in_names[0] if in_names else "")
+            mic = pick_real(self.inputs, din)
+            want_in = mic[1] if mic else (in_names[0] if in_names else "")
         self.in_var.set(want_in)
+        # Where test playback goes: the default output, unless that's the cable.
+        self.default_out_is_cable = any(i == dout and is_cable(n) for i, n in self.outputs)
+        listen = pick_real(self.outputs, dout) if self.default_out_is_cable else None
+        self.listen_device = listen[0] if listen else None
 
         want_out = self.out_var.get() or (self.cfg.get("output") if initial else "")
         if want_out not in out_names:
@@ -229,6 +238,10 @@ class App:
                      "To use it in Discord, install a free virtual audio cable, press Refresh, "
                      "and pick it here.")
             tip = ""
+        if self.default_out_is_cable and not self.audio_error:
+            tip = ("⚠ Windows is sending all its sound into the virtual cable (it's the default output), "
+                   "so you won't hear Discord or anything else. In Windows Sound settings, set Output back "
+                   "to your headphones or speakers. " + tip)
         self.cable_hint.configure(text=hint)
         self.discord_tip.configure(text=tip)
         if show_btn:
@@ -333,6 +346,7 @@ class App:
                                  f"{e}\n\nTry another device, or close other apps that are using it.")
             return
         self.engine = engine
+        self._silent_polls = 0
         self.start_btn.configure(text="■  Stop")
         self._update_status()
 
@@ -346,6 +360,10 @@ class App:
         self.start_btn.configure(text="▶  Start")
         self._update_status()
 
+    @property
+    def mic_silent(self) -> bool:
+        return self.engine is not None and self._silent_polls >= SILENT_POLLS
+
     def _update_status(self) -> None:
         delay = self.current_settings().tail * 1000
         if self.engine is not None:
@@ -353,6 +371,8 @@ class App:
             text = f"● On   ·   voice delay {delay:.0f} ms"
             if drop:
                 text += f"   ·   {drop} audio dropouts"
+            if self.mic_silent:
+                text += "\n⚠ No sound from the microphone. Is it muted (headset mute button)?"
         else:
             text = f"Stopped   ·   voice delay will be {delay:.0f} ms"
         self.status.configure(text=text)
@@ -370,7 +390,10 @@ class App:
         if self.engine is not None:
             levels = self.engine.take_levels()
             self._meter = [max(new, old * 0.8) for new, old in zip(levels, self._meter)]
-            if self.engine.dropouts:
+            was_silent = self.mic_silent
+            # A working mic always picks up some noise; a muted one sends (near) digital zero.
+            self._silent_polls = self._silent_polls + 1 if levels[0] < SILENT_MIC else 0
+            if self.engine.dropouts or self.mic_silent != was_silent:
                 self._update_status()
         else:
             self._meter = [m * 0.8 for m in self._meter]
@@ -442,7 +465,7 @@ class App:
         self.play_orig_btn.state(state)
 
     def play_test(self, ghost: bool) -> None:
-        from .realtime import _sd
+        from .realtime import _sd, opened
 
         if self.recording is None:
             return
@@ -451,7 +474,8 @@ class App:
         try:
             sd = _sd()
             sd.stop()
-            sd.play(y.astype(np.float32), rate)
+            with opened(self.listen_device) as dev:
+                sd.play(y.astype(np.float32), rate, device=dev)
         except BaseException as e:
             self.test_status.configure(text=f"⚠ Playback failed: {e}")
 

@@ -65,8 +65,8 @@ class FakeSD:
     def wait(self):
         pass
 
-    def play(self, data, samplerate):
-        self.played.append((np.asarray(data), samplerate))
+    def play(self, data, samplerate, device=None):
+        self.played.append((np.asarray(data), samplerate, device))
 
     def stop(self):
         pass
@@ -84,6 +84,17 @@ WINDOWS_LIKE = [
     _dev("CABLE Output (VB-Audio Virtual ", 8, 0),
     _dev("Microphone (Realtek Audio)", 2, 0, api=1),  # same devices again on another host API
     _dev("CABLE Input (VB-Audio Virtual Cable)", 0, 8, api=1),
+]
+
+
+CABLE_IS_DEFAULT = [  # Windows MME right after installing VB-CABLE: the cable became the default
+    _dev("Microsoft Sound Mapper - Input", 2, 0),
+    _dev("CABLE Output (VB-Audio Virtual ", 16, 0),
+    _dev("HX Microphone (HyperX Cloud II ", 1, 0),
+    _dev("Microsoft Sound Mapper - Output", 0, 2),
+    _dev("CABLE Input (VB-Audio Virtual C", 0, 16),
+    _dev("CABLE In 16ch (VB-Audio Virtual", 0, 16),
+    _dev("Speakers (HyperX Cloud II Wirel", 0, 2),
 ]
 
 

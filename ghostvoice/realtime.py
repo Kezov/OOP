@@ -33,16 +33,36 @@ def list_devices() -> str:
     return str(_sd().query_devices())
 
 
+ALIAS_HINTS = ("sound mapper", "primary sound")
+"""Windows pseudo-devices that just follow the system default device."""
+
+
 def is_cable(name: str) -> bool:
     n = name.lower()
     return any(h in n for h in CABLE_HINTS)
 
 
+def is_alias(name: str) -> bool:
+    n = name.lower()
+    return any(h in n for h in ALIAS_HINTS)
+
+
+def pick_real(devices, default):
+    """The default device if it is a real one (not a cable or Windows alias), else the first real one.
+
+    Installing VB-CABLE often makes it the Windows default, and the "Sound Mapper"
+    aliases then point at the cable too, so neither can be trusted to be a mic or
+    speakers. Returns ``(device, name)`` or None.
+    """
+    real = [(i, n) for i, n in devices if not is_cable(n) and not is_alias(n)]
+    return next((d for d in real if d[0] == default), real[0] if real else None)
+
+
 def discord_input_name(output_name: str) -> str:
     """What the cable is called on the Discord (input) side."""
     n = output_name.lower()
-    if "cable input" in n:
-        return output_name[: n.index("cable input")] + "CABLE Output"
+    if "cable in" in n:  # "CABLE Input" and "CABLE In 16ch" both feed "CABLE Output"
+        return output_name[: n.index("cable in")] + "CABLE Output"
     if "voicemeeter input" in n:
         return "VoiceMeeter Output"
     if "ghostvoice" in n:

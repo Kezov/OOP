@@ -78,6 +78,50 @@ def test_record_and_play(app, fake_sd):
     assert ghost.size > orig.size  # ghost version starts with the swell
 
 
+def test_record_and_play_on_normal_speakers(app, fake_sd):
+    app.recording = (np.zeros(4800), 48000)
+    app.play_test(False)
+    assert fake_sd.played[-1][2] is None  # default output is the speakers: play there
+    assert "Windows is sending all its sound" not in app.discord_tip.cget("text")
+
+
+def test_cable_as_windows_default(fake_sd, monkeypatch, tmp_path):
+    """Installing VB-CABLE made it the Windows default mic and speakers."""
+    from conftest import CABLE_IS_DEFAULT
+
+    fake_sd.devices = CABLE_IS_DEFAULT
+    fake_sd.default.device = [1, 4]
+    monkeypatch.setattr("ghostvoice.gui.config_path", lambda: tmp_path / "settings.json")
+    root = tk.Tk()
+    try:
+        a = App(root, persist=False)
+        # not the cable, and not "Sound Mapper", which follows the default to the cable
+        assert a.in_var.get() == "HX Microphone (HyperX Cloud II "
+        assert a.out_var.get() == "CABLE Input (VB-Audio Virtual C"
+        assert "Windows is sending all its sound" in a.discord_tip.cget("text")
+        a.recording = (np.zeros(4800), 48000)
+        a.play_test(True)
+        assert fake_sd.played[-1][2] == 6  # the real speakers, not the cable
+        a.out_var.set("CABLE In 16ch (VB-Audio Virtual")
+        a.on_device_change()
+        assert "“CABLE Output”" in a.discord_tip.cget("text")
+    finally:
+        root.destroy()
+
+
+def test_warns_when_mic_is_silent(app, fake_sd):
+    app.toggle()
+    stream = fake_sd.streams[-1]
+    for _ in range(45):
+        stream.feed(np.zeros(256, np.float32))
+        app._poll()
+    assert "muted" in app.status.cget("text")
+    stream.feed(np.full(256, 0.01, np.float32))
+    app._poll()
+    assert "muted" not in app.status.cget("text")
+    app.toggle()
+
+
 def test_settings_are_remembered(app, tmp_path):
     app.preset_var.set("veil")
     app.on_preset()

@@ -20,7 +20,16 @@ def test_cable_detection_and_discord_names():
     assert realtime.is_cable("BlackHole 2ch")
     assert not realtime.is_cable("Speakers (Realtek Audio)")
     assert realtime.discord_input_name("CABLE Input (VB-Audio Virtual C") == "CABLE Output"
+    assert realtime.discord_input_name("CABLE In 16ch (VB-Audio Virtual") == "CABLE Output"
     assert realtime.discord_input_name("BlackHole 2ch") == "BlackHole 2ch"
+
+
+def test_pick_real_skips_cables_and_windows_aliases():
+    devs = [(0, "Microsoft Sound Mapper - Input"), (1, "CABLE Output (VB-Audio Virtual "),
+            (2, "HX Microphone (HyperX Cloud II "), (7, "Primary Sound Capture Driver")]
+    assert realtime.pick_real(devs, 1) == (2, "HX Microphone (HyperX Cloud II ")  # default is the cable
+    assert realtime.pick_real(devs, 2) == (2, "HX Microphone (HyperX Cloud II ")
+    assert realtime.pick_real(devs[:2], 1) is None
 
 
 def test_engine_streams_the_ghost_filter(fake_sd):
