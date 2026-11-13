@@ -32,7 +32,7 @@ from .ir import load_ir, normalize_energy, shape_ir, synth_reverb_ir
 @dataclass
 class GhostSettings:
     tail: float = 0.45
-    """Length of the reverse-reverb swell in seconds. Also the live latency."""
+    """Length of the reverse-reverb swell in seconds. Also the live latency (none when ``mix`` is 0)."""
     decay: float = 1.2
     """RT60 of the synthetic reverb in seconds (ignored with ``ir_path``)."""
     mix: float = 0.7
@@ -53,6 +53,11 @@ def levels(settings: GhostSettings) -> tuple[float, float]:
     mix = float(np.clip(settings.mix, 0.0, 1.0))
     g = 10 ** (settings.gain_db / 20)
     return (1.0 - mix) * g, mix * g
+
+
+def voice_delay(settings: GhostSettings) -> float:
+    """How long the live voice is delayed (seconds): the swell length, or 0 with the wash off."""
+    return settings.tail if settings.mix > 0 else 0.0
 
 
 def with_levels(settings: GhostSettings, voice: float, ghost: float) -> GhostSettings:
@@ -79,12 +84,17 @@ def build_kernel(sample_rate: int, settings: GhostSettings) -> np.ndarray:
 
     The wet part is the reversed reverb. The dry voice is a unit impulse at the
     *end* of the kernel, i.e. delayed so it lands right where the swell peaks.
+    With no wash (``mix`` 0) there is no swell to wait for, so the kernel is a
+    single tap: the voice passes straight through with no delay.
     """
-    ir = build_reverb_ir(sample_rate, settings)
     mix = float(np.clip(settings.mix, 0.0, 1.0))
+    gain = 10 ** (settings.gain_db / 20)
+    if mix <= 0.0:
+        return np.array([gain])
+    ir = build_reverb_ir(sample_rate, settings)
     kernel = mix * ir[::-1]
     kernel[-1] += 1.0 - mix
-    return kernel * 10 ** (settings.gain_db / 20)
+    return kernel * gain
 
 
 def soft_limit(x: np.ndarray, threshold: float = 0.8) -> np.ndarray:
@@ -168,8 +178,10 @@ def reverse_reverb_offline(x: np.ndarray, sample_rate: int, settings: GhostSetti
     """
     settings = settings or GhostSettings()
     x = np.asarray(x, dtype=np.float64).ravel()
-    ir = build_reverb_ir(sample_rate, settings)
     mix = float(np.clip(settings.mix, 0.0, 1.0))
+    if mix <= 0.0:  # no wash: the voice unchanged, like the live filter
+        return soft_limit(x * 10 ** (settings.gain_db / 20))
+    ir = build_reverb_ir(sample_rate, settings)
 
     reversed_x = x[::-1]                                   # 1. reverse
     reverbed = signal.fftconvolve(reversed_x, ir)          # 2. reverb

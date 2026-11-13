@@ -26,6 +26,21 @@ def test_mild_presets_keep_the_voice_at_full_volume():
     assert set(NOTES) == set(PRESETS)
 
 
+def test_normal_preset_passes_the_voice_through_unchanged():
+    from ghostvoice import GhostFilter
+    from ghostvoice.ghost import reverse_reverb_offline, voice_delay
+
+    s = PRESETS["normal"]
+    assert levels(s) == pytest.approx((1.0, 0.0)) and voice_delay(s) == 0.0
+    x = np.random.default_rng(1).standard_normal(256 * 20) * 0.2
+    g = GhostFilter(48000, s, 256)
+    assert g.latency_samples == 0
+    np.testing.assert_allclose(g.process(x), x, atol=1e-9)  # no delay, no change
+    np.testing.assert_allclose(reverse_reverb_offline(x, 48000, s), x, atol=1e-12)
+    # and from the app's sliders: Ghost at 0 means no delay
+    assert voice_delay(from_controls(to_controls(s))) == 0.0
+
+
 @pytest.mark.parametrize("name", list(PRESETS))
 def test_controls_round_trip(name):
     s = PRESETS[name]

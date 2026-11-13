@@ -112,6 +112,7 @@ will feed back).
 
 | Preset    | Sound | Delay |
 |-----------|-------|-------|
+| `normal`  | Your voice exactly as it is, no effect | none |
 | `mist` (default) | The classic ghost swell, turned down so every word stays clear | 0.45 s |
 | `breath`  | Airy breath around a clear voice; the easiest to understand | 0.35 s |
 | `faint`   | Short, light swell | 0.3 s |
@@ -125,6 +126,10 @@ The mild presets (`mist`, `breath`, `faint`, `veil`) keep your voice at its norm
 volume and put the wash 8-10 dB below it. On a speech test they scored 0.87-0.94 on
 STOI, a standard speech-intelligibility measure (1.0 = as clear as the original),
 against 0.44-0.67 for the strong ones.
+
+With the ghost wash at 0 % (the `normal` preset, or the Ghost slider at 0) there is
+no swell to wait for, so the voice goes straight through with no delay. Handy for
+talking normally without changing Discord's input device.
 
 ## Tuning (command line)
 

@@ -11,6 +11,8 @@ def _mild(ghost: float, **kw) -> GhostSettings:
 
 
 PRESETS: dict[str, GhostSettings] = {
+    # Off: the voice exactly as it comes in. No wash, so no delay either.
+    "normal": with_levels(GhostSettings(), voice=1.0, ghost=0.0),
     # Mild: the voice stays at full volume, so every word is easy to understand.
     "mist": _mild(0.32),
     "breath": _mild(0.40, tail=0.35, decay=1.0, highpass=1200.0, lowpass=10000.0),
@@ -24,6 +26,7 @@ PRESETS: dict[str, GhostSettings] = {
 }
 
 NOTES: dict[str, str] = {
+    "normal": "Your voice exactly as it is: no ghost effect and no delay.",
     "mist": "The classic ghost swell, turned down so every word stays clear.",
     "breath": "Airy breath around a clear voice. The easiest to understand.",
     "faint": "A short, light swell with the least delay.",

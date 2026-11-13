@@ -48,6 +48,21 @@ def test_preset_and_sliders(app):
     assert levels(app.current_settings())[1] == pytest.approx(0.10)
 
 
+def test_switch_to_normal_while_live(app, fake_sd):
+    app.toggle()
+    stream = fake_sd.streams[-1]
+    x = np.full(256 * 40, 0.1, np.float32)
+    stream.feed(x)
+    app.preset_var.set("normal")
+    app.on_preset()
+    app.apply()
+    assert app.engine.filter.latency_samples == 0
+    assert "voice delay 0 ms" in app.status.cget("text")
+    out = stream.feed(x)  # crossfades from the ghost kernel to the plain voice
+    np.testing.assert_allclose(out[-256:, 0], 0.1, atol=1e-6)  # then just the voice
+    app.toggle()
+
+
 def test_live_start_update_stop(app, fake_sd):
     app.toggle()
     assert app.engine is not None and app.engine.running

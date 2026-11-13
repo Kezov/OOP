@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__
-from .ghost import GhostFilter, reverse_reverb_offline
+from .ghost import GhostFilter, reverse_reverb_offline, voice_delay
 from .presets import DEFAULT_PRESET, LOWPASS_OFF, NOTES, PRESETS, from_controls, to_controls
 
 SAMPLE_RATE = 48000
@@ -365,7 +365,7 @@ class App:
         return self.engine is not None and self._silent_polls >= SILENT_POLLS
 
     def _update_status(self) -> None:
-        delay = self.current_settings().tail * 1000
+        delay = voice_delay(self.current_settings()) * 1000
         if self.engine is not None:
             drop = self.engine.dropouts
             text = f"● On   ·   voice delay {delay:.0f} ms"
