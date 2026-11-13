@@ -80,12 +80,14 @@ def test_live_start_update_stop(app, fake_sd):
 
 
 def test_record_and_play(app, fake_sd):
+    import time
+
     app.record_test()
-    for _ in range(100):
+    deadline = time.monotonic() + 10  # the recording runs on a thread; give a slow CI runner time
+    while app.recording is None and time.monotonic() < deadline:
         app.root.update()
-        app._check_recording() if app._rec_result is not None else None
-        if app.recording is not None:
-            break
+        app._check_recording()
+        time.sleep(0.005)
     assert app.recording is not None
     app.play_test(True)
     app.play_test(False)

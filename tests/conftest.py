@@ -40,7 +40,7 @@ class FakeStream:
 class FakeSD:
     def __init__(self, devices, default=(0, 1), supported_rates=(48000,)):
         self.PortAudioError = type("PortAudioError", (Exception,), {})
-        self.devices = devices
+        self.devices = list(devices)  # tests edit this; keep the shared device lists intact
         self.default = SimpleNamespace(device=list(default))
         self.supported_rates = set(supported_rates)
         self.streams = []
