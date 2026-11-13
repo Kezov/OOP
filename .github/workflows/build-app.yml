@@ -24,7 +24,15 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
       - run: pip install -e ".[dev]"
-      - run: xvfb-run -a pytest -q
+      - name: pytest
+        shell: bash
+        # Failures also become annotations, which (unlike logs) show without signing in.
+        run: |
+          set -o pipefail
+          xvfb-run -a pytest -q -rf --tb=line 2>&1 | tee pytest.log || {
+            grep -E '^(FAILED|ERROR)|^/.*:[0-9]+: ' pytest.log | head -20 | sed 's/^/::error::/'
+            exit 1
+          }
 
   app:
     needs: test
