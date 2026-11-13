@@ -1,0 +1,121 @@
+name: Build app
+
+# Builds the double-click app for Windows, macOS and Linux on every push.
+# Download it from the run's "Artifacts" section. Pushing a tag like v0.2.0
+# also publishes the downloads as a GitHub Release.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
+      - run: pip install -e ".[dev]"
+      - run: xvfb-run -a pytest -q
+
+  app:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: GhostVoice-Windows
+          - os: macos-latest
+            name: GhostVoice-macOS
+          - os: ubuntu-22.04
+            name: GhostVoice-Linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
+      - run: python -m pip install --upgrade pip
+      - run: pip install . pyinstaller
+      - run: pyinstaller packaging/ghostvoice.spec --noconfirm
+
+      - name: Self-test the app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\GhostVoice.exe -ArgumentList '--selftest','--report','selftest.json' -Wait -PassThru
+          Get-Content selftest.json
+          if ($p.ExitCode -ne 0) { exit 1 }
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item dist\GhostVoice.exe, packaging\HOW-TO-USE.txt out\
+      - name: Self-test the app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          dist/GhostVoice.app/Contents/MacOS/GhostVoice --selftest --report selftest.json || { cat selftest.json; exit 1; }
+          mkdir out
+          ditto -c -k --keepParent dist/GhostVoice.app out/GhostVoice-macOS.zip
+          cp packaging/HOW-TO-USE.txt out/
+      - name: Self-test the app (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a dist/GhostVoice --selftest --report selftest.json || { cat selftest.json; exit 1; }
+          mkdir out
+          tar -czf out/GhostVoice-Linux.tar.gz -C dist GhostVoice
+          cp packaging/HOW-TO-USE.txt out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+
+  launchers:
+    # The double-click scripts that run from source (fallback if the app is blocked).
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: runner.os == 'Windows'
+        shell: cmd
+        run: GhostVoice.bat --selftest
+      - if: runner.os == 'macOS'
+        run: ./GhostVoice.command --selftest
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
+          xvfb-run -a ./GhostVoice.command --selftest
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [app, launchers]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: |
+          cd artifacts
+          for d in */; do (cd "$d" && zip -qr "../${d%/}.zip" .); done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip

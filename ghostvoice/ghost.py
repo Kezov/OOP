@@ -19,7 +19,8 @@ sample.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy import signal
@@ -45,6 +46,22 @@ class GhostSettings:
     ir_path: str | None = None
     """Use a reverb impulse response from a WAV file instead of the synthetic one."""
     seed: int | None = 1234
+
+
+def levels(settings: GhostSettings) -> tuple[float, float]:
+    """Output levels ``(voice, ghost)`` as linear gains; 1.0 = original loudness."""
+    mix = float(np.clip(settings.mix, 0.0, 1.0))
+    g = 10 ** (settings.gain_db / 20)
+    return (1.0 - mix) * g, mix * g
+
+
+def with_levels(settings: GhostSettings, voice: float, ghost: float) -> GhostSettings:
+    """Set the voice and ghost-wash levels independently (inverse of :func:`levels`)."""
+    voice, ghost = max(float(voice), 0.0), max(float(ghost), 0.0)
+    total = voice + ghost
+    if total <= 1e-9:
+        return replace(settings, mix=0.0, gain_db=-200.0)
+    return replace(settings, mix=ghost / total, gain_db=float(20 * np.log10(total)))
 
 
 def build_reverb_ir(sample_rate: int, settings: GhostSettings) -> np.ndarray:
@@ -87,32 +104,58 @@ class GhostFilter:
 
     Feed it blocks of ``block_size`` samples (multiples are fine) and it returns
     the same number of processed samples.
+
+    :meth:`update` may be called from another thread (e.g. a GUI) while the
+    audio thread calls :meth:`process`; the new sound is crossfaded in over
+    ``crossfade`` seconds so slider moves don't click.
     """
 
-    def __init__(self, sample_rate: int, settings: GhostSettings | None = None, block_size: int = 256):
+    MAX_TAIL = 2.0
+    """Input history kept for live changes of ``tail`` (seconds)."""
+
+    def __init__(
+        self,
+        sample_rate: int,
+        settings: GhostSettings | None = None,
+        block_size: int = 256,
+        crossfade: float = 0.03,
+    ):
         self.sample_rate = sample_rate
         self.block_size = block_size
         self.settings = settings or GhostSettings()
-        self._conv = PartitionedConvolver(build_kernel(sample_rate, self.settings), block_size)
+        self._conv = PartitionedConvolver(
+            build_kernel(sample_rate, self.settings), block_size, history=int(self.MAX_TAIL * sample_rate)
+        )
+        self._kernel_length = self._conv.kernel_length
+        self._fade_blocks = max(1, round(crossfade * sample_rate / block_size))
+        self._gen = itertools.count(1)
+        self._pending: tuple | None = None  # (generation, H, length), replaced atomically
+        self._installed = 0
 
     @property
     def latency_samples(self) -> int:
-        """Delay from input to the dry voice in the output."""
-        return self._conv.kernel_length - 1
+        """Delay from input to the dry voice in the output (for the latest settings)."""
+        return self._kernel_length - 1
 
     @property
     def latency_seconds(self) -> float:
         return self.latency_samples / self.sample_rate
 
     def update(self, settings: GhostSettings) -> None:
-        """Change settings while running (e.g. from a GUI slider)."""
+        """Change settings while running (e.g. from a GUI slider). Thread-safe."""
+        H, length = self._conv.prepare(build_kernel(self.sample_rate, settings))
         self.settings = settings
-        self._conv.set_kernel(build_kernel(self.sample_rate, settings))
+        self._kernel_length = length
+        self._pending = (next(self._gen), H, length)
 
     def reset(self) -> None:
         self._conv.reset()
 
     def process(self, x: np.ndarray) -> np.ndarray:
+        pending = self._pending
+        if pending is not None and pending[0] != self._installed:
+            self._installed = pending[0]
+            self._conv.install(pending[1], pending[2], crossfade_blocks=self._fade_blocks)
         return soft_limit(self._conv.process(x))
 
 

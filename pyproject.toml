@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ghostvoice"
-version = "0.1.0"
+version = "0.2.0"
 description = "Ghostly reverse-reverb voice filter for Discord"
 requires-python = ">=3.9"
 dependencies = ["numpy", "scipy", "sounddevice", "soundfile"]
@@ -14,6 +14,9 @@ dev = ["pytest"]
 
 [project.scripts]
 ghostvoice = "ghostvoice.cli:main"
+
+[project.gui-scripts]
+ghostvoice-gui = "ghostvoice.gui:main"
 
 [tool.setuptools]
 packages = ["ghostvoice"]

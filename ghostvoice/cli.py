@@ -1,4 +1,4 @@
-"""Command line interface: `ghostvoice devices | run | file`."""
+"""Command line interface: `ghostvoice gui | devices | run | file`."""
 
 from __future__ import annotations
 
@@ -7,19 +7,15 @@ from dataclasses import replace
 
 import numpy as np
 
-from .ghost import GhostSettings, reverse_reverb_offline
-
-PRESETS = {
-    "ghost": GhostSettings(),
-    "whisper": GhostSettings(tail=0.3, decay=0.8, mix=0.6, highpass=400.0),
-    "phantom": GhostSettings(tail=0.7, decay=2.0, mix=0.8, highpass=200.0, lowpass=7000.0),
-    "banshee": GhostSettings(tail=0.6, decay=1.5, mix=0.9, highpass=900.0, lowpass=12000.0),
-}
+from .ghost import GhostSettings, levels, reverse_reverb_offline, with_levels
+from .presets import DEFAULT_PRESET, PRESETS
 
 
 def _add_effect_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("effect")
-    g.add_argument("--preset", choices=PRESETS, default="ghost", help="starting point (default: ghost)")
+    g.add_argument("--preset", choices=PRESETS, default=DEFAULT_PRESET, help=f"starting point (default: {DEFAULT_PRESET})")
+    g.add_argument("--voice", type=float, help="voice volume in %% (100 = unchanged)")
+    g.add_argument("--ghost", type=float, help="ghostly wash volume in %% of the voice level")
     g.add_argument("--tail", type=float, help="swell length in seconds; also the live delay")
     g.add_argument("--decay", type=float, help="reverb decay time (RT60) in seconds")
     g.add_argument("--mix", type=float, help="0 = dry voice, 1 = only the ghostly wash")
@@ -39,7 +35,15 @@ def settings_from_args(args: argparse.Namespace) -> GhostSettings:
     for k in ("highpass", "lowpass"):
         if overrides.get(k) == 0:
             overrides[k] = None
-    return replace(s, **overrides)
+    s = replace(s, **overrides)
+    if args.voice is not None or args.ghost is not None:
+        voice, ghost = levels(s)
+        s = with_levels(
+            s,
+            voice if args.voice is None else args.voice / 100,
+            ghost if args.ghost is None else args.ghost / 100,
+        )
+    return s
 
 
 def cmd_devices(args) -> None:
@@ -51,7 +55,13 @@ def cmd_devices(args) -> None:
 def cmd_run(args) -> None:
     from .realtime import run
 
-    run(settings_from_args(args), args.input, args.output, args.samplerate, args.block)
+    run(settings_from_args(args), args.input, args.output, args.samplerate, args.block, latency=args.latency)
+
+
+def cmd_gui(args) -> None:
+    from .gui import main as gui_main
+
+    raise SystemExit(gui_main(["--selftest"] if args.selftest else []))
 
 
 def cmd_file(args) -> None:
@@ -75,8 +85,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("-o", "--output", help="output device, e.g. 'CABLE Input' or 'BlackHole'; default = speakers")
     p.add_argument("--samplerate", type=int, default=48000)
     p.add_argument("--block", type=int, default=256, help="audio block size in samples (default 256)")
+    p.add_argument("--latency", type=float, default=0.06, help="audio buffering in seconds (default 0.06)")
     _add_effect_args(p)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("gui", help="open the app window")
+    p.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("file", help="apply the effect to an audio file")
     p.add_argument("infile")

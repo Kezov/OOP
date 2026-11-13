@@ -1,0 +1,28 @@
+GhostVoice - ghostly voice filter for Discord
+=============================================
+
+1. START IT
+   Windows: double-click GhostVoice.exe.
+            If Windows says "Windows protected your PC", click "More info" -> "Run anyway"
+            (the app isn't signed with a paid certificate). It takes a few seconds to open.
+   macOS:   unzip, then right-click GhostVoice.app -> Open -> Open. If macOS still refuses:
+            System Settings -> Privacy & Security -> "Open Anyway". Allow microphone access.
+   Linux:   chmod +x GhostVoice && ./GhostVoice   (needs: sudo apt install libportaudio2)
+
+2. TRY IT WITHOUT DISCORD
+   Pick your microphone, press "Record 5 s", say something, then "Play ghost".
+   Try the presets: mist (default), breath, faint and veil keep your words clear;
+   ghost, whisper, phantom and banshee are stronger and harder to understand.
+
+3. USE IT IN DISCORD
+   Discord can't load filters, so GhostVoice plays into a free "virtual audio cable"
+   that Discord then uses as its microphone:
+   - Windows: install VB-CABLE (https://vb-audio.com/Cable/), restart the PC.
+   - macOS:   install BlackHole 2ch (https://existential.audio/blackhole/).
+   - Linux:   see the README (two pactl commands).
+   In GhostVoice press Refresh, choose the cable under "Send ghost voice to", press Start.
+   In Discord -> User Settings -> Voice & Video:
+     Input Device: "CABLE Output" (Windows) / "BlackHole 2ch" (macOS)
+     Turn OFF Noise Suppression and Echo Cancellation (they strip out the ghostly wash).
+   Your voice reaches Discord about half a second late (the "Swell length"), because the
+   swell plays before each word. With push-to-talk, hold the key a moment longer.
