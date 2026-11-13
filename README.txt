@@ -1,2 +1,0 @@
-Alexander Brown
-Hayden Ridgeway
