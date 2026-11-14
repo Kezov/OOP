@@ -19,7 +19,7 @@ from ghostvoice.presets import PRESETS  # noqa: E402
 def app(fake_sd, monkeypatch, tmp_path):
     monkeypatch.setattr("ghostvoice.gui.config_path", lambda: tmp_path / "settings.json")
     root = tk.Tk()
-    a = App(root, persist=True)
+    a = App(root, persist=True, global_hotkeys=False)
     root.update()
     yield a
     if a.engine is not None:
@@ -44,7 +44,7 @@ def test_preset_and_sliders(app):
     assert app.current_settings().highpass == 1200.0
     app.vars["ghost"].set(10)
     app.on_slider("ghost")
-    assert app.preset_var.get() == "custom"
+    assert app.preset_var.get() == "custom (unsaved)" and app.preset_name is None
     assert levels(app.current_settings())[1] == pytest.approx(0.10)
 
 
@@ -111,7 +111,7 @@ def test_cable_as_windows_default(fake_sd, monkeypatch, tmp_path):
     monkeypatch.setattr("ghostvoice.gui.config_path", lambda: tmp_path / "settings.json")
     root = tk.Tk()
     try:
-        a = App(root, persist=False)
+        a = App(root, persist=False, global_hotkeys=False)
         # not the cable, and not "Sound Mapper", which follows the default to the cable
         assert a.in_var.get() == "HX Microphone (HyperX Cloud II "
         assert a.out_var.get() == "CABLE Input (VB-Audio Virtual C"
@@ -146,7 +146,7 @@ def test_settings_are_remembered(app, tmp_path):
     import json
 
     saved = json.loads((tmp_path / "settings.json").read_text())
-    assert saved["preset"] == "veil" and saved["output"].startswith("CABLE Input")
+    assert saved["effects"]["ghost"]["preset"] == "veil" and saved["output"].startswith("CABLE Input")
 
 
 def test_selftest(fake_sd):

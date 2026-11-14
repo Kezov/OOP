@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from .effects import make_filter
 from .ghost import GhostFilter, GhostSettings
 
 CABLE_HINTS = ("cable input", "blackhole", "ghostvoice", "voicemeeter input", "vb-audio", "loopback")
@@ -203,13 +204,19 @@ def resolve_device(spec: str | None, kind: str):
 
 
 class LiveEngine:
-    """Runs the ghost filter between an input and an output device.
+    """Runs an effect (ghost, pitch, ...) between an input and an output device.
 
     ``latency`` is the audio buffering requested from the driver. The ghost
     effect already delays the voice by its swell length, so a little extra
     buffering (60 ms) costs almost nothing and avoids dropouts, which on
     PulseAudio can silence the output for seconds.
+
+    :meth:`update` may switch to another effect while running; the old and new
+    filters then play together for a short crossfade.
     """
+
+    CROSSFADE = 0.05
+    """Seconds to crossfade when switching between effects."""
 
     def __init__(
         self,
@@ -226,13 +233,18 @@ class LiveEngine:
         self.output_device = output_device
         self.sample_rate = sample_rate
         self.block_size = block_size
-        self.filter: GhostFilter | None = None
+        self.filter = None
         self.input_name = self.output_name = ""
         self.out_channels = 0
         self.dropouts = 0
         self._stream = None
         self._in_peak = 0.0
         self._out_peak = 0.0
+        self._swap: tuple | None = None  # (generation, new filter), set by update()
+        self._swap_gen = 0
+        self._swapped = 0
+        self._fade_from = None
+        self._fade_pos = 0
 
     @property
     def running(self) -> bool:
@@ -263,7 +275,7 @@ class LiveEngine:
         error = None
         for rate in rates:  # some devices refuse 48 kHz; fall back to their own rate
             try:
-                self.filter = GhostFilter(rate, self.settings, self.block_size)
+                self.filter = make_filter(rate, self.settings, self.block_size)
                 stream = sd.Stream(
                     device=(input_device, output_device),
                     samplerate=rate,
@@ -289,10 +301,17 @@ class LiveEngine:
             stream.stop()
             stream.close()
 
-    def update(self, settings: GhostSettings) -> None:
+    def update(self, settings) -> None:
+        """New settings, for the same or another effect. Thread-safe."""
+        current = self._swap[1] if self._swap and self._swap[0] != self._swapped else self.filter
         self.settings = settings
-        if self.filter is not None:
-            self.filter.update(settings)
+        if current is None:
+            return
+        if type(current.settings) is type(settings):
+            current.update(settings)  # same effect: the filter crossfades by itself
+        else:
+            self._swap_gen += 1
+            self._swap = (self._swap_gen, make_filter(self.sample_rate, settings, self.block_size))
 
     def take_levels(self) -> tuple[float, float]:
         """Peak input and output level since the last call."""
@@ -304,7 +323,20 @@ class LiveEngine:
         if status:
             self.dropouts += 1
         x = indata[:, 0]
+        swap = self._swap
+        if swap is not None and swap[0] != self._swapped:
+            self._swapped = swap[0]
+            self._fade_from, self.filter = self.filter, swap[1]
+            self._fade_pos = 0
         y = self.filter.process(x)
+        if self._fade_from is not None:
+            old = self._fade_from.process(x)
+            n = max(int(self.CROSSFADE * self.sample_rate), 1)
+            ramp = np.minimum((self._fade_pos + np.arange(1, y.size + 1)) / n, 1.0)
+            y = old + (y - old) * ramp
+            self._fade_pos += y.size
+            if self._fade_pos >= n:
+                self._fade_from = None
         outdata[:] = y[:, None].astype(np.float32)
         self._in_peak = max(self._in_peak, float(np.abs(x).max()))
         self._out_peak = max(self._out_peak, float(np.abs(y).max()))

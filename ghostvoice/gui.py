@@ -1,10 +1,11 @@
-"""Desktop app: pick devices, tune the ghost, start/stop, test without Discord."""
+"""Desktop app: pick devices, an effect and a preset, start/stop, hotkeys, test without Discord."""
 
 from __future__ import annotations
 
 import json
 import os
 import platform
+import queue
 import sys
 import threading
 import traceback
@@ -14,26 +15,19 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__
-from .ghost import GhostFilter, reverse_reverb_offline, voice_delay
-from .presets import DEFAULT_PRESET, LOWPASS_OFF, NOTES, PRESETS, from_controls, to_controls
+from .effects import DEFAULT_EFFECT, EFFECTS, Effect, delay_seconds, make_filter, render
+from .hotkeys import HOTKEY_LABEL, GlobalHotkeys, digit_from_keysym
 
 SAMPLE_RATE = 48000
 BLOCK_SIZE = 256
 TEST_SECONDS = 5
 SILENT_MIC = 1e-4  # input peak below this (-80 dBFS) counts as a muted mic
 SILENT_POLLS = 40  # warn after 2 s of it (the meters poll every 50 ms)
-CUSTOM = "custom"
+UNSAVED = "custom (unsaved)"
+CUSTOM_SUFFIX = " (custom)"
+FAV = "★ "
+MAX_NAME = 40
 REPO_URL = "https://github.com/Kezov/OOP#hooking-it-up-to-discord"
-
-# key, label, min, max, step, value formatter
-SLIDERS = [
-    ("voice", "Voice volume", 0, 150, 1, lambda v: f"{v:.0f}%"),
-    ("ghost", "Ghost volume", 0, 150, 1, lambda v: f"{v:.0f}%"),
-    ("tail", "Swell length (= delay)", 0.1, 1.0, 0.05, lambda v: f"{v:.2f} s"),
-    ("decay", "Reverb decay", 0.3, 4.0, 0.1, lambda v: f"{v:.1f} s"),
-    ("highpass", "Ghost low cut", 0, 2000, 50, lambda v: "off" if v <= 0 else f"{v:.0f} Hz"),
-    ("lowpass", "Ghost high cut", 2000, LOWPASS_OFF, 500, lambda v: "off" if v >= LOWPASS_OFF else f"{v / 1000:.1f} kHz"),
-]
 
 
 def config_path() -> Path:
@@ -55,7 +49,7 @@ def cable_download_url() -> str:
 
 
 class App:
-    def __init__(self, root, persist: bool = True):
+    def __init__(self, root, persist: bool = True, global_hotkeys: bool = True):
         import tkinter as tk
         from tkinter import ttk
 
@@ -76,12 +70,25 @@ class App:
         self._silent_polls = 0
         self.default_out_is_cable = False
         self.listen_device = None
+        # effects and presets
+        self.effect: Effect = EFFECTS[DEFAULT_EFFECT]
+        self.preset_name: str | None = self.effect.default  # None = sliders changed, not saved
+        self.custom: dict[str, dict[str, dict[str, float]]] = {k: {} for k in EFFECTS}
+        self.favorites: list[str] = []  # "effect:preset"
+        self.hotkeys: dict[int, tuple[str, str]] = {}  # numpad digit -> (effect, preset)
+        self.last: dict[str, dict] = {}  # per effect: the preset/sliders you had
+        self._display_map: dict[str, str] = {}
+        self.vars: dict = {}
+        self.value_labels: dict = {}
+        self._hotkey_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self.global_hotkeys: GlobalHotkeys | None = None
 
         root.title(f"GhostVoice {__version__}")
         root.resizable(True, False)
         self._build()
         self.refresh_devices(initial=True)
-        self._load_controls()
+        self._load_state()
+        self._start_hotkeys(global_hotkeys)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._poll()
 
@@ -103,7 +110,7 @@ class App:
         self.in_box = ttk.Combobox(dev, textvariable=self.in_var, state="readonly", width=44)
         self.in_box.grid(row=0, column=1, sticky="ew", pady=2)
         ttk.Button(dev, text="Refresh", command=self.refresh_devices).grid(row=0, column=2, padx=(6, 0))
-        ttk.Label(dev, text="Send ghost voice to").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(dev, text="Send voice to").grid(row=1, column=0, sticky="w", padx=(0, 8))
         self.out_var = tk.StringVar()
         self.out_box = ttk.Combobox(dev, textvariable=self.out_var, state="readonly", width=44)
         self.out_box.grid(row=1, column=1, sticky="ew", pady=2)
@@ -114,32 +121,43 @@ class App:
         self.in_box.bind("<<ComboboxSelected>>", lambda e: self.on_device_change())
         self.out_box.bind("<<ComboboxSelected>>", lambda e: self.on_device_change())
 
-        # 2. sound
-        snd = ttk.LabelFrame(main, text=" 2  Sound ", padding=8)
-        snd.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        # 2. tabs: sound, hotkeys, test (keeps the window short enough for small screens)
+        self.tabs = ttk.Notebook(main)
+        self.tabs.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        snd = ttk.Frame(self.tabs, padding=8)
+        hk = ttk.Frame(self.tabs, padding=8)
+        test = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(snd, text="  2  Sound  ")
+        self.tabs.add(hk, text=f"  Hotkeys ({HOTKEY_LABEL})  ")
+        self.tabs.add(test, text="  Test without Discord  ")
         snd.columnconfigure(1, weight=1)
-        ttk.Label(snd, text="Preset").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.preset_var = tk.StringVar(value=DEFAULT_PRESET)
-        self.preset_box = ttk.Combobox(snd, textvariable=self.preset_var, values=list(PRESETS), state="readonly", width=14)
-        self.preset_box.grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(snd, text="Effect").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.effect_var = tk.StringVar(value=self.effect.label)
+        self.effect_box = ttk.Combobox(snd, textvariable=self.effect_var, state="readonly", width=16,
+                                       values=[e.label for e in EFFECTS.values()])
+        self.effect_box.grid(row=0, column=1, sticky="w", pady=2)
+        self.effect_box.bind("<<ComboboxSelected>>", lambda e: self.on_effect())
+        ttk.Label(snd, text="Preset").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        row = ttk.Frame(snd)
+        row.grid(row=1, column=1, sticky="w", pady=2)
+        self.preset_var = tk.StringVar()
+        self.preset_box = ttk.Combobox(row, textvariable=self.preset_var, state="readonly", width=22)
+        self.preset_box.grid(row=0, column=0)
         self.preset_box.bind("<<ComboboxSelected>>", lambda e: self.on_preset())
+        self.fav_btn = ttk.Button(row, text="☆ Favorite", width=11, command=self.toggle_favorite)
+        self.fav_btn.grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(row, text="Save as…", command=self.ask_save).grid(row=0, column=2, padx=(4, 0))
+        self.del_btn = ttk.Button(row, text="Delete", command=self.ask_delete)
+        self.del_btn.grid(row=0, column=3, padx=(4, 0))
         self.note = ttk.Label(snd, text="", foreground="#555", wraplength=470, justify="left")
-        self.note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
-        self.vars: dict[str, tk.DoubleVar] = {}
-        self.value_labels: dict[str, ttk.Label] = {}
-        for r, (key, label, lo, hi, _step, _fmt) in enumerate(SLIDERS, start=2):
-            ttk.Label(snd, text=label).grid(row=r, column=0, sticky="w", padx=(0, 8))
-            var = tk.DoubleVar(value=lo)
-            scale = ttk.Scale(snd, from_=lo, to=hi, variable=var, orient="horizontal",
-                              command=lambda _v, k=key: self.on_slider(k))
-            scale.grid(row=r, column=1, sticky="ew", pady=1)
-            val = ttk.Label(snd, width=8, anchor="e")
-            val.grid(row=r, column=2, sticky="e")
-            self.vars[key], self.value_labels[key] = var, val
+        self.note.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.slider_frame = ttk.Frame(snd)
+        self.slider_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.slider_frame.columnconfigure(1, weight=1)
 
         # 3. live
         live = ttk.LabelFrame(main, text=" 3  Live ", padding=8)
-        live.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        live.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         live.columnconfigure(1, weight=1)
         self.start_btn = ttk.Button(live, text="▶  Start", command=self.toggle, width=12)
         self.start_btn.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 12))
@@ -154,12 +172,29 @@ class App:
             c.grid(row=i, column=1, sticky="w", pady=1)
             self.meter_canvases.append(c)
 
-        # test
-        test = ttk.LabelFrame(main, text=" Test without Discord ", padding=8)
-        test.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        # hotkeys tab
+        ttk.Label(hk, text="Switch presets instantly, even mid-sentence. Pick a preset on the Sound tab, "
+                           "choose a numpad key and press Assign. Presets from different effects can "
+                           "each have their own key.", wraplength=470, justify="left"
+                  ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        hk_row = ttk.Frame(hk)
+        hk_row.grid(row=1, column=0, sticky="w")
+        ttk.Label(hk_row, text="Numpad key").grid(row=0, column=0, padx=(0, 8))
+        self.hotkey_var = tk.StringVar(value="Num 1")
+        ttk.Combobox(hk_row, textvariable=self.hotkey_var, state="readonly", width=7,
+                     values=[f"Num {d}" for d in range(10)]).grid(row=0, column=1)
+        self.assign_btn = ttk.Button(hk_row, text="Assign current preset", command=self.on_assign)
+        self.assign_btn.grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(hk_row, text="Clear", command=self.on_clear_hotkey).grid(row=0, column=3, padx=(4, 0))
+        self.hotkey_list = ttk.Label(hk, text="", justify="left")
+        self.hotkey_list.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.hotkey_hint = ttk.Label(hk, text="", foreground="#555", wraplength=470, justify="left")
+        self.hotkey_hint.grid(row=3, column=0, sticky="w", pady=(8, 0))
+
+        # test tab
         self.rec_btn = ttk.Button(test, text=f"●  Record {TEST_SECONDS} s", command=self.record_test)
         self.rec_btn.grid(row=0, column=0, padx=(0, 6))
-        self.play_ghost_btn = ttk.Button(test, text="▶  Play ghost", command=lambda: self.play_test(True))
+        self.play_ghost_btn = ttk.Button(test, text="▶  Play with effect", command=lambda: self.play_test(True))
         self.play_ghost_btn.grid(row=0, column=1, padx=(0, 6))
         self.play_orig_btn = ttk.Button(test, text="▶  Play original", command=lambda: self.play_test(False))
         self.play_orig_btn.grid(row=0, column=2)
@@ -170,6 +205,20 @@ class App:
 
         self.discord_tip = ttk.Label(main, text="", foreground="#555", wraplength=490, justify="left")
         self.discord_tip.grid(row=4, column=0, sticky="w")
+
+    def _build_sliders(self) -> None:
+        tk, ttk = self.tk, self.ttk
+        for w in self.slider_frame.winfo_children():
+            w.destroy()
+        self.vars, self.value_labels = {}, {}
+        for r, s in enumerate(self.effect.sliders):
+            ttk.Label(self.slider_frame, text=s.label).grid(row=r, column=0, sticky="w", padx=(0, 8))
+            var = tk.DoubleVar(value=s.lo)
+            ttk.Scale(self.slider_frame, from_=s.lo, to=s.hi, variable=var, orient="horizontal",
+                      command=lambda _v, k=s.key: self.on_slider(k)).grid(row=r, column=1, sticky="ew", pady=1)
+            val = ttk.Label(self.slider_frame, width=9, anchor="e")
+            val.grid(row=r, column=2, sticky="e")
+            self.vars[s.key], self.value_labels[s.key] = var, val
 
     # --------------------------------------------------------------- devices
     def refresh_devices(self, initial: bool = False) -> None:
@@ -227,9 +276,9 @@ class App:
             hint = "⚠ No microphone or output device found. Plug one in and press Refresh."
             tip = ""
         elif is_cable(out):
-            hint = "✓ Sending to a virtual cable, so Discord can hear the ghost voice."
+            hint = "✓ Sending to a virtual cable, so Discord can hear the effect."
             tip = (f"In Discord: User Settings → Voice & Video → Input Device: “{discord_input_name(out)}”. "
-                   "Turn off Noise Suppression and Echo Cancellation, or Discord removes the ghostly wash.")
+                   "Turn off Noise Suppression and Echo Cancellation, or Discord removes much of the effect.")
         else:
             show_btn = not has_cable
             hint = ("Playing on this device: good for listening (use headphones to avoid feedback), "
@@ -255,60 +304,32 @@ class App:
 
     # ------------------------------------------------------------- controls
     def controls(self) -> dict[str, float]:
-        return {key: self._quantize(key, self.vars[key].get()) for key, *_ in SLIDERS}
+        return {s.key: s.quantize(self.vars[s.key].get()) for s in self.effect.sliders}
 
     def current_settings(self):
-        return from_controls(self.controls())
-
-    @staticmethod
-    def _quantize(key: str, v: float) -> float:
-        spec = next(s for s in SLIDERS if s[0] == key)
-        lo, hi, step = spec[2], spec[3], spec[4]
-        return float(min(max(round((v - lo) / step) * step + lo, lo), hi))
+        return self.effect.settings(self.controls())
 
     def set_controls(self, c: dict[str, float]) -> None:
         self._loading = True
         try:
-            for key, *_rest in SLIDERS:
-                if key in c:
-                    self.vars[key].set(self._quantize(key, c[key]))
-                self._show_value(key)
+            for s in self.effect.sliders:
+                if s.key in c:
+                    self.vars[s.key].set(s.quantize(c[s.key]))
+                self._show_value(s.key)
         finally:
             self._loading = False
 
     def _show_value(self, key: str) -> None:
-        fmt = next(s[5] for s in SLIDERS if s[0] == key)
-        self.value_labels[key].configure(text=fmt(self._quantize(key, self.vars[key].get())))
-
-    def _load_controls(self) -> None:
-        preset = self.cfg.get("preset", DEFAULT_PRESET)
-        saved = self.cfg.get("controls")
-        if preset in PRESETS:
-            self.preset_var.set(preset)
-            self.set_controls(to_controls(PRESETS[preset]))
-            self.note.configure(text=NOTES.get(preset, ""))
-        if preset == CUSTOM and isinstance(saved, dict):
-            self.set_controls({**to_controls(PRESETS[DEFAULT_PRESET]), **saved})
-            self.preset_var.set(CUSTOM)
-        elif preset not in PRESETS:
-            self.preset_var.set(DEFAULT_PRESET)
-            self.set_controls(to_controls(PRESETS[DEFAULT_PRESET]))
-            self.note.configure(text=NOTES[DEFAULT_PRESET])
-        self._update_status()
-
-    def on_preset(self) -> None:
-        name = self.preset_var.get()
-        if name in PRESETS:
-            self.set_controls(to_controls(PRESETS[name]))
-            self.note.configure(text=NOTES.get(name, ""))
-            self.schedule_apply(0)
+        s = self.effect.slider(key)
+        self.value_labels[key].configure(text=s.fmt(s.quantize(self.vars[key].get())))
 
     def on_slider(self, key: str) -> None:
         self._show_value(key)
         if self._loading:
             return
-        self.preset_var.set(CUSTOM)
-        self.note.configure(text="Your own mix. Pick a preset to start over.")
+        if self.preset_name is not None:
+            self.preset_name = None
+            self._refresh_presets()
         self.schedule_apply()
 
     def schedule_apply(self, delay_ms: int = 120) -> None:
@@ -317,10 +338,239 @@ class App:
         self._apply_job = self.root.after(delay_ms, self.apply)
 
     def apply(self) -> None:
+        if self._apply_job is not None:
+            self.root.after_cancel(self._apply_job)
         self._apply_job = None
         if self.engine is not None:
             self.engine.update(self.current_settings())
         self._update_status()
+
+    # -------------------------------------------------------------- effects
+    def on_effect(self) -> None:
+        key = next((e.key for e in EFFECTS.values() if e.label == self.effect_var.get()), None)
+        if key is not None:
+            self.set_effect(key)
+
+    def set_effect(self, key: str) -> None:
+        if key == self.effect.key:
+            return
+        self._remember()
+        self.effect = EFFECTS[key]
+        self.effect_var.set(self.effect.label)
+        self._build_sliders()
+        self._restore(key)
+        self.schedule_apply(0)
+
+    def _remember(self) -> None:
+        self.last[self.effect.key] = {"preset": self.preset_name, "controls": self.controls()}
+
+    def _restore(self, key: str) -> None:
+        """Bring back the preset or sliders this effect had (or its default preset)."""
+        st = self.last.get(key) or {}
+        name = st.get("preset")
+        if name and self.preset_controls(key, name) is not None:
+            self.preset_name = name
+            self.set_controls(self.preset_controls(key, name))
+        elif isinstance(st.get("controls"), dict):
+            self.preset_name = None
+            self.set_controls(self.effect.clean(st["controls"]))
+        else:
+            self.preset_name = self.effect.default
+            self.set_controls(self.effect.presets[self.effect.default])
+        self._refresh_presets()
+
+    # -------------------------------------------------------------- presets
+    def preset_controls(self, effect_key: str, name: str) -> dict[str, float] | None:
+        e = EFFECTS[effect_key]
+        if name in e.presets:
+            return e.presets[name]
+        return self.custom.get(effect_key, {}).get(name)
+
+    def is_favorite(self, effect_key: str, name: str) -> bool:
+        return f"{effect_key}:{name}" in self.favorites
+
+    def preset_names(self, effect_key: str | None = None) -> list[str]:
+        """Favorites first, then built-in presets, then your own (A-Z)."""
+        e = EFFECTS[effect_key or self.effect.key]
+        names = list(e.presets) + sorted(self.custom[e.key], key=str.lower)
+        favs = [n for n in names if self.is_favorite(e.key, n)]
+        return favs + [n for n in names if n not in favs]
+
+    def display(self, name: str) -> str:
+        text = name + (CUSTOM_SUFFIX if name in self.custom[self.effect.key] else "")
+        return FAV + text if self.is_favorite(self.effect.key, name) else text
+
+    def _refresh_presets(self) -> None:
+        ek, name = self.effect.key, self.preset_name
+        self._display_map = {self.display(n): n for n in self.preset_names()}
+        self.preset_box["values"] = list(self._display_map)
+        self.preset_var.set(self.display(name) if name else UNSAVED)
+        saved = name is not None
+        self.fav_btn.configure(text="★ Favorite" if saved and self.is_favorite(ek, name) else "☆ Favorite")
+        self.fav_btn.state(["!disabled"] if saved else ["disabled"])
+        self.del_btn.state(["!disabled"] if saved and name in self.custom[ek] else ["disabled"])
+        self.assign_btn.state(["!disabled"] if saved else ["disabled"])
+        if not saved:
+            note = "Your own mix. Use Save as… to keep it, or pick a preset."
+        elif name in self.custom[ek]:
+            note = "One of your saved presets."
+        else:
+            note = self.effect.notes.get(name, "")
+        self.note.configure(text=note)
+
+    def on_preset(self) -> None:
+        name = self._display_map.get(self.preset_var.get())
+        if name is not None:
+            self.select_preset(name)
+
+    def select_preset(self, name: str) -> None:
+        c = self.preset_controls(self.effect.key, name)
+        if c is None:
+            return
+        self.preset_name = name
+        self.set_controls(c)
+        self._refresh_presets()
+        self.schedule_apply(0)
+
+    def check_name(self, name: str) -> tuple[str, str | None]:
+        """Clean up a new preset name; returns ``(name, error or None)``."""
+        name = " ".join((name or "").split())
+        if not name:
+            return name, "Type a name for the preset."
+        if len(name) > MAX_NAME:
+            return name, f"Keep the name under {MAX_NAME} characters."
+        if name.lower() in (UNSAVED, "custom") or name.startswith(FAV.strip()) or name.endswith(CUSTOM_SUFFIX):
+            return name, "That name is reserved. Pick another one."
+        if name in self.effect.presets:
+            return name, f"“{name}” is a built-in preset. Pick another name."
+        return name, None
+
+    def save_preset(self, name: str) -> None:
+        """Save the current sliders as one of your presets (replacing one with the same name)."""
+        self.custom[self.effect.key][name] = self.controls()
+        self.preset_name = name
+        self._refresh_presets()
+        self._refresh_hotkeys()
+        self.save_config()
+
+    def delete_preset(self, name: str) -> None:
+        ek = self.effect.key
+        if name not in self.custom[ek]:
+            return
+        del self.custom[ek][name]
+        if self.is_favorite(ek, name):
+            self.favorites.remove(f"{ek}:{name}")
+        for d in [d for d, target in self.hotkeys.items() if target == (ek, name)]:
+            del self.hotkeys[d]
+        if self.preset_name == name:
+            self.preset_name = None  # keep the sliders, now unsaved
+        self._refresh_presets()
+        self._refresh_hotkeys()
+        self.save_config()
+
+    def toggle_favorite(self) -> None:
+        if self.preset_name is None:
+            return
+        key = f"{self.effect.key}:{self.preset_name}"
+        if key in self.favorites:
+            self.favorites.remove(key)
+        else:
+            self.favorites.append(key)
+        self._refresh_presets()
+        self.save_config()
+
+    def ask_save(self) -> None:
+        from tkinter import messagebox, simpledialog
+
+        suggested = self.preset_name if self.preset_name in self.custom[self.effect.key] else ""
+        raw = simpledialog.askstring("Save preset", f"Name for this {self.effect.label} preset:",
+                                     initialvalue=suggested, parent=self.root)
+        if raw is None:
+            return
+        name, error = self.check_name(raw)
+        if error:
+            messagebox.showerror("Save preset", error, parent=self.root)
+            return
+        if name in self.custom[self.effect.key] and not messagebox.askyesno(
+                "Save preset", f"Replace your preset “{name}”?", parent=self.root):
+            return
+        self.save_preset(name)
+
+    def ask_delete(self) -> None:
+        from tkinter import messagebox
+
+        name = self.preset_name
+        if name is None or name not in self.custom[self.effect.key]:
+            return
+        keys = [d for d, t in self.hotkeys.items() if t == (self.effect.key, name)]
+        extra = f"\nIts hotkey (Num {', '.join(map(str, sorted(keys)))}) will be cleared too." if keys else ""
+        if messagebox.askyesno("Delete preset", f"Delete your preset “{name}”?{extra}", parent=self.root):
+            self.delete_preset(name)
+
+    # -------------------------------------------------------------- hotkeys
+    def _start_hotkeys(self, global_hotkeys: bool) -> None:
+        if global_hotkeys and GlobalHotkeys.supported():
+            self.global_hotkeys = GlobalHotkeys(self._hotkey_queue.put)
+            if self.global_hotkeys.start():
+                self.hotkey_hint.configure(text="Works anywhere, even while Discord or a game is focused.")
+                return
+            error = self.global_hotkeys.error
+            self.global_hotkeys = None
+            hint = f"Hotkeys only work while this window is focused ({error})."
+        else:
+            hint = "On this system, hotkeys only work while the GhostVoice window is focused."
+        self.root.bind_all("<Control-Shift-KeyPress>", self._on_tk_key)
+        self.hotkey_hint.configure(text=hint)
+
+    def _on_tk_key(self, event):
+        digit = digit_from_keysym(event.keysym)
+        if digit is None:
+            return None
+        self._hotkey_queue.put(digit)
+        return "break"
+
+    def _hotkey_digit(self) -> int:
+        return int(self.hotkey_var.get().split()[-1])
+
+    def assign_hotkey(self, digit: int) -> None:
+        if self.preset_name is None:
+            return
+        self.hotkeys[digit] = (self.effect.key, self.preset_name)
+        self._refresh_hotkeys()
+        self.save_config()
+
+    def clear_hotkey(self, digit: int) -> None:
+        if self.hotkeys.pop(digit, None) is not None:
+            self._refresh_hotkeys()
+            self.save_config()
+
+    def on_assign(self) -> None:
+        self.assign_hotkey(self._hotkey_digit())
+        free = next((d for d in list(range(1, 10)) + [0] if d not in self.hotkeys), None)
+        if free is not None:
+            self.hotkey_var.set(f"Num {free}")  # ready for the next one
+
+    def on_clear_hotkey(self) -> None:
+        self.clear_hotkey(self._hotkey_digit())
+
+    def trigger_hotkey(self, digit: int) -> None:
+        target = self.hotkeys.get(digit)
+        if target is None:
+            return
+        ek, name = target
+        if ek not in EFFECTS or self.preset_controls(ek, name) is None:
+            return
+        self.set_effect(ek)
+        self.select_preset(name)
+        self.apply()  # the Live status line shows the new effect and preset
+
+    def _refresh_hotkeys(self) -> None:
+        if not self.hotkeys:
+            text = "No hotkeys yet. Pick a preset, choose a numpad key and press Assign."
+        else:
+            text = "\n".join(f"Num {d}   →   {EFFECTS[ek].label}: {name}"
+                             for d, (ek, name) in sorted(self.hotkeys.items()))
+        self.hotkey_list.configure(text=text)
 
     # ------------------------------------------------------------------ live
     def toggle(self) -> None:
@@ -365,16 +615,17 @@ class App:
         return self.engine is not None and self._silent_polls >= SILENT_POLLS
 
     def _update_status(self) -> None:
-        delay = voice_delay(self.current_settings()) * 1000
+        delay = delay_seconds(self.current_settings()) * 1000
+        sound = f"{self.effect.label}: {self.preset_name or 'custom'}"
         if self.engine is not None:
             drop = self.engine.dropouts
-            text = f"● On   ·   voice delay {delay:.0f} ms"
+            text = f"● On   ·   {sound}   ·   voice delay {delay:.0f} ms"
             if drop:
                 text += f"   ·   {drop} audio dropouts"
             if self.mic_silent:
                 text += "\n⚠ No sound from the microphone. Is it muted (headset mute button)?"
         else:
-            text = f"Stopped   ·   voice delay will be {delay:.0f} ms"
+            text = f"Stopped   ·   {sound}   ·   voice delay will be {delay:.0f} ms"
         self.status.configure(text=text)
 
     def _draw_meter(self, canvas, peak: float) -> None:
@@ -387,6 +638,12 @@ class App:
             canvas.create_rectangle(0, 0, frac * w, h, fill=color, width=0)
 
     def _poll(self) -> None:
+        while True:
+            try:
+                digit = self._hotkey_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.trigger_hotkey(digit)
         if self.engine is not None:
             levels = self.engine.take_levels()
             self._meter = [max(new, old * 0.8) for new, old in zip(levels, self._meter)]
@@ -464,13 +721,13 @@ class App:
         self.play_ghost_btn.state(state)
         self.play_orig_btn.state(state)
 
-    def play_test(self, ghost: bool) -> None:
+    def play_test(self, with_effect: bool) -> None:
         from .realtime import _sd, opened
 
         if self.recording is None:
             return
         x, rate = self.recording
-        y = reverse_reverb_offline(x, rate, self.current_settings()) if ghost else x
+        y = render(x, rate, self.current_settings()) if with_effect else x
         try:
             sd = _sd()
             sd.stop()
@@ -479,26 +736,62 @@ class App:
         except BaseException as e:
             self.test_status.configure(text=f"⚠ Playback failed: {e}")
 
-    # ------------------------------------------------------------- lifecycle
+    # ------------------------------------------------------------- settings
     def _load_config(self) -> dict:
         try:
-            return json.loads(config_path().read_text())
+            cfg = json.loads(config_path().read_text())
+            return cfg if isinstance(cfg, dict) else {}
         except Exception:
             return {}
+
+    def _load_state(self) -> None:
+        """Effects, presets, favorites and hotkeys from the saved settings (any older format too)."""
+        cfg = self.cfg
+        last = cfg.get("effects") if isinstance(cfg.get("effects"), dict) else {}
+        if "effects" not in cfg and "preset" in cfg:  # settings from before there were several effects
+            old = cfg.get("preset")
+            last = {"ghost": {"preset": old if old != "custom" else None, "controls": cfg.get("controls")}}
+        self.last = {k: v for k, v in last.items() if k in EFFECTS and isinstance(v, dict)}
+        custom = cfg.get("custom_presets") if isinstance(cfg.get("custom_presets"), dict) else {}
+        for ek, presets in custom.items():
+            if ek in EFFECTS and isinstance(presets, dict):
+                for name, c in presets.items():
+                    if isinstance(name, str) and isinstance(c, dict) and name not in EFFECTS[ek].presets:
+                        self.custom[ek][name] = EFFECTS[ek].clean(c)
+        favs = cfg.get("favorites") if isinstance(cfg.get("favorites"), list) else []
+        self.favorites = [f for f in favs if isinstance(f, str)]
+        hk = cfg.get("hotkeys") if isinstance(cfg.get("hotkeys"), dict) else {}
+        for d, target in hk.items():
+            if (str(d).isdigit() and 0 <= int(d) <= 9 and isinstance(target, list) and len(target) == 2
+                    and target[0] in EFFECTS and self.preset_controls(target[0], target[1]) is not None):
+                self.hotkeys[int(d)] = (target[0], target[1])
+        key = cfg.get("effect") if cfg.get("effect") in EFFECTS else DEFAULT_EFFECT
+        self.effect = EFFECTS[key]
+        self.effect_var.set(self.effect.label)
+        self._build_sliders()
+        self._restore(key)
+        self._refresh_hotkeys()
+        self._update_status()
 
     def save_config(self) -> None:
         if not self.persist:
             return
+        self._remember()
         cfg = {
             "input": self.in_var.get(),
             "output": self.out_var.get(),
-            "preset": self.preset_var.get(),
-            "controls": self.controls(),
+            "effect": self.effect.key,
+            "effects": self.last,
+            "custom_presets": self.custom,
+            "favorites": self.favorites,
+            "hotkeys": {str(d): list(t) for d, t in sorted(self.hotkeys.items())},
         }
         try:
             path = config_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(cfg, indent=2))
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cfg, indent=2))
+            os.replace(tmp, path)
         except Exception:
             pass
 
@@ -508,6 +801,8 @@ class App:
             self.root.after_cancel(self._apply_job)
         self.save_config()
         self.stop()
+        if self.global_hotkeys is not None:
+            self.global_hotkeys.stop()
         try:
             import sounddevice as sd
 
@@ -537,9 +832,10 @@ def selftest(report: str | None = None) -> int:
     }
     ok = True
     try:
-        g = GhostFilter(SAMPLE_RATE, PRESETS[DEFAULT_PRESET], BLOCK_SIZE)
-        y = g.process(np.random.default_rng(0).standard_normal(BLOCK_SIZE * 40) * 0.1)
-        assert np.isfinite(y).all()
+        x = np.random.default_rng(0).standard_normal(BLOCK_SIZE * 40) * 0.1
+        for e in EFFECTS.values():
+            f = make_filter(SAMPLE_RATE, e.settings(e.presets[e.default]), BLOCK_SIZE)
+            assert np.isfinite(f.process(x)).all(), e.key
         info["dsp"] = "ok"
         try:
             import sounddevice as sd
@@ -559,7 +855,7 @@ def selftest(report: str | None = None) -> int:
         import tkinter as tk
 
         root = tk.Tk()
-        app = App(root, persist=False)
+        app = App(root, persist=False, global_hotkeys=False)
         root.update_idletasks()
         root.update()
         app.close()

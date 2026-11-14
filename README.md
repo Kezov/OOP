@@ -1,7 +1,10 @@
 # ghostvoice
 
-A ghostly voice filter for Discord, built on the **reverse → reverb → reverse**
-trick: every word swells up out of a spectral wash *before* you say it.
+A voice changer for Discord. Its signature effect is a ghostly voice built on the
+**reverse → reverb → reverse** trick: every word swells up out of a spectral wash
+*before* you say it. It also has a **pitch shift** effect (deep, demon, chipmunk…),
+your own saved presets, favorites, and **Ctrl + Shift + Numpad** hotkeys to switch
+sounds mid-conversation.
 
 ## Download and run
 
@@ -24,14 +27,27 @@ needs [Python 3.9+](https://www.python.org/downloads/) and internet once.
 
 In the app:
 
-1. **Devices:** pick your microphone, and under *Send ghost voice to* your
+1. **Devices:** pick your microphone, and under *Send voice to* your
    virtual cable (see below). The cable is picked automatically if it's installed.
-2. **Sound:** pick a preset or move the sliders. Changes apply instantly, even while running.
-3. **Start.** The meters show your mic and the ghost voice going out.
+2. **Sound:** pick an **effect** (Ghost voice or Pitch shift), then a preset, or move
+   the sliders. Each effect has its own sliders and presets. Changes apply instantly,
+   even while running.
+   - **Save as…** keeps your slider mix as a named preset; **Delete** removes one of
+     your own presets (built-in ones stay).
+   - **☆ Favorite** pins a preset to the top of the list (★).
+3. **Start.** The meters show your mic and the voice going out.
 
-**Test without Discord:** press *Record 5 s*, say something, then *Play ghost*
-and *Play original* (on your default speakers or headphones). Change the sound and
-play again.
+**Hotkeys tab:** pick a preset, choose a numpad key and press *Assign current
+preset*. Then **Ctrl + Shift + Numpad 0-9** switches to that preset instantly, even
+while Discord or a game is focused (Windows; elsewhere only while the GhostVoice
+window is focused). Keys can point at presets of different effects, so one key
+can be your ghost voice and the next a demon voice. Switches crossfade smoothly.
+They work with NumLock on or off. Windows doesn't pass keys to the app while an
+app running as administrator is focused.
+
+**Test without Discord tab:** press *Record 5 s*, say something, then *Play with
+effect* and *Play original* (on your speakers or headphones). Change the sound
+and play again.
 
 ## How it works
 
@@ -51,11 +67,14 @@ for sample.
 
 ```
 ghostvoice/
-  ghost.py      the effect (live GhostFilter + literal offline version)
+  ghost.py      the ghost effect (live GhostFilter + literal offline version)
   convolver.py  low-latency partitioned FFT convolution
   ir.py         synthetic reverb generator / IR file loading
-  realtime.py   mic -> filter -> output device (LiveEngine)
-  presets.py    built-in sounds
+  pitch.py      the pitch shift effect (granular, ~25 ms delay)
+  effects.py    the effects list: sliders, presets, filters for each
+  realtime.py   mic -> filter -> output device (LiveEngine, crossfades between effects)
+  presets.py    built-in ghost sounds
+  hotkeys.py    global Ctrl+Shift+Numpad hotkeys (Windows low-level keyboard hook)
   gui.py        the app window
   cli.py        command line
 packaging/      PyInstaller recipe for the double-click app (built by GitHub Actions)
@@ -104,11 +123,11 @@ The app shows the right Discord setting for your cable once it's selected.
    - Lower the input sensitivity threshold, or use push-to-talk. Hold push-to-talk
      about half a second after you finish speaking, because of the delay.
 
-To hear the effect yourself first, use the app's *Record / Play ghost* buttons,
+To hear the effect yourself first, use the app's *Record / Play with effect* buttons,
 or leave out `-o` to play it live through your speakers (use headphones, or it
 will feed back).
 
-## Presets
+## Ghost voice presets
 
 | Preset    | Sound | Delay |
 |-----------|-------|-------|
@@ -130,6 +149,24 @@ against 0.44-0.67 for the strong ones.
 With the ghost wash at 0 % (the `normal` preset, or the Ghost slider at 0) there is
 no swell to wait for, so the voice goes straight through with no delay. Handy for
 talking normally without changing Discord's input device.
+
+## Pitch shift presets
+
+| Preset     | Sound | Pitch |
+|------------|-------|-------|
+| `deep` (default) | A deeper, bigger voice that still sounds like you | -4 semitones |
+| `demon`    | Very low with a trace of your real voice underneath | -10 |
+| `giant`    | A full octave down, dark and booming | -12 |
+| `twin`     | Your voice plus a lower twin speaking along with you | -5, mixed with your voice |
+| `chipmunk` | High and squeaky | +7 |
+| `helium`   | A full octave up | +12 |
+
+Sliders: *Pitch* (±12 semitones), *Shifted voice* and *Original voice* volumes (mix
+in your real voice for a doubled sound), *Grain size* (shorter is tighter but
+buzzier, longer is smoother but slightly echoey), and *Low cut* / *High cut* for
+the shifted voice. The delay is about half the grain size (~25 ms), so pitch shift
+feels close to instant. The pitch shift is in the app only; the command line below
+is for the ghost voice.
 
 ## Tuning (command line)
 
